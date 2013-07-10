@@ -4,15 +4,16 @@
 #include "WaveUtil.h"
 #include "WaveHC.h"
 
+#define HALL_PIN 14   // Hall sensor pin
+#define DEBOUNCE 100  // button debouncer
+#define TICK_FILE_NAME "tick55.WAV" // name of the tick WAV file on the SD card 
 
 SdReader card;    // This object holds the information for the card
 FatVolume vol;    // This holds the information for the partition on the card
 FatReader root;   // This holds the information for the filesystem on the card
-FatReader f;      // This holds the information for the file we're play
+FatReader f;      // This holds the information for the file we're playing
 
 WaveHC wave;      // This is the only wave (audio) object, since we will only play one at a time
-
-#define DEBOUNCE 100  // button debouncer
 
 // this handy function will return the number of bytes currently free in RAM, great for debugging!   
 int freeRam(void)
@@ -40,29 +41,28 @@ void sdErrorCheck(void)
 }
 
 void setup() {
-  // set up serial port
+  
+  // set up serial port @ 9600 baud - this can be any speed really
   Serial.begin(9600);
-  putstring_nl("WaveHC with 6 buttons");
   
-   putstring("Free RAM: ");       // This can help with debugging, running out of RAM is bad
-  Serial.println(freeRam());      // if this is under 150 bytes it may spell trouble!
+  // This can help with debugging, running out of RAM is bad
+  // if this is under 150 bytes it may spell trouble!
+  putstring("Free RAM: ");
+  Serial.println(freeRam());
   
+  // Setup hall sensor
+  // enable pull-up resistors on switch pins (analog inputs)
+  putstring("Hall sensor listening on pin ");
+  Serial.println(HALL_PIN, DEC);
+  digitalWrite(HALL_PIN, HIGH);
+ 
+  putstring_nl("Setting up wave shield...");
+  // This sets up the wave shield
   // Set the output pins for the DAC control. This pins are defined in the library
   pinMode(2, OUTPUT);
   pinMode(3, OUTPUT);
   pinMode(4, OUTPUT);
   pinMode(5, OUTPUT);
- 
-  // pin13 LED
-  pinMode(13, OUTPUT);
- 
-  // enable pull-up resistors on switch pins (analog inputs)
-  digitalWrite(14, HIGH);
-  digitalWrite(15, HIGH);
-  digitalWrite(16, HIGH);
-  digitalWrite(17, HIGH);
-  digitalWrite(18, HIGH);
-  digitalWrite(19, HIGH);
  
   //  if (!card.init(true)) { //play with 4 MHz spi if 8MHz isn't working for you
   if (!card.init()) {         //play with 8 MHz spi (default faster!)  
@@ -74,7 +74,7 @@ void setup() {
   // enable optimize read - some cards may timeout. Disable if you're having problems
   card.partialBlockRead(true);
  
-// Now we will look for a FAT partition!
+  // Now we will look for a FAT partition!
   uint8_t part;
   for (part = 0; part < 5; part++) {     // we have up to 5 slots to look in
     if (vol.init(card, part)) 
@@ -98,82 +98,59 @@ void setup() {
     while(1);                             // then 'halt' - do nothing!
   }
   
+  // This can help with debugging, running out of RAM is bad
+  // if this is under 150 bytes it may spell trouble!
+  putstring("Free RAM: ");
+  Serial.println(freeRam());
+  
   // Whew! We got past the tough parts.
-  putstring_nl("Ready!");
+  putstring_nl("I'm ready for you to spin the wheel!");
 }
 
 void loop() {
-  //putstring(".");            // uncomment this to see if the loop isnt running
-  switch (check_switches()) {
+  switch (check_hall_switch()) {
     case 1:
-      playfile("tick55.WAV");
+      playfile(TICK_FILE_NAME);
       break;
-    case 2:
-      playcomplete("2.WAV");
-      break;
-    case 3:
-      playcomplete("3.WAV");
-      break;
-    case 4:
-      playcomplete("4.WAV");
-      break;
-    case 5:
-      playcomplete("5.WAV");
-      break;
-    case 6:
-      playcomplete("6.WAV");
   }
 }
 
-byte check_switches()
+boolean check_hall_switch()
 {
-  static byte previous[6];
-  static long time[6];
+  static byte previous;
+  static long time;
   byte reading;
-  byte pressed;
-  byte index;
+  byte pressed = false;
   pressed = 0;
 
-  for (byte index = 0; index < 6; ++index) {
-    reading = digitalRead(14 + index);
-    if (reading == LOW && previous[index] == HIGH && millis() - time[index] > DEBOUNCE)
-    {
+  reading = digitalRead(HALL_PIN);
+  if (reading == LOW && previous == HIGH && millis() - time > DEBOUNCE)
+  {
       // switch pressed
-      time[index] = millis();
-      pressed = index + 1;
-      break;
-    }
-    previous[index] = reading;
+      time = millis();
+      pressed = true;
   }
-  // return switch number (1 - 6)
-  if(pressed > 0) {
-    Serial.print("Pressed: "); 
-    Serial.print(pressed, DEC);
+  previous = reading;
+  
+  if (pressed) {
+    Serial.print("Tick goes the wheel..."); 
     Serial.print("\n");
   }
   return (pressed);
 }
 
 
-// Plays a full file from beginning to end with no pause.
-void playcomplete(char *name) {
-  // call our helper to find and play this name
-  playfile(name);
-  while (wave.isplaying) {
-  // do nothing while its playing
-  }
-  // now its done playing
-}
-
 void playfile(char *name) {
   // see if the wave object is currently doing something
   if (wave.isplaying) {// already playing something, so stop it!
     wave.stop(); // stop it
   }
+
   // look in the root directory and open the file
   if (!f.open(root, name)) {
     putstring("Couldn't open file "); Serial.print(name); return;
   }
+
   // OK read the file and turn it into a wave object
   if (!wave.create(f)) {
     putstring_nl("Not a valid WAV"); return;
