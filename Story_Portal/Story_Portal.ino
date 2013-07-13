@@ -4,9 +4,24 @@
 #include "WaveUtil.h"
 #include "WaveHC.h"
 
+#define ERROR_LED_PIN 13 // Pin for onboard LED (usually 13) so we can flash the LED if things are wonky
 #define HALL_PIN 14   // Hall sensor pin
-#define DEBOUNCE 100  // button debouncer
-#define TICK_FILE_NAME "tick55.WAV" // name of the tick WAV file on the SD card 
+
+#define DEBOUNCE 100  // button debounce interval
+
+#define TICK_FILE_NAME "tick.WAV" // name of the tick WAV file on the SD card 
+#define STOP_FILE_NAME "stop.WAV" // name of the stop WAV file on the SD card 
+
+#define WHEEL_STOPPED 0
+#define WHEEL_MOVING 1
+#define WHEEL_STOP_THRESHOLD_MS 3000
+#define WHEEL_TICKS_BEFORE_SPIN 5
+
+volatile byte wheel_state;
+volatile long current_tick;
+volatile long last_tick; 
+volatile byte previous_sensor_state;
+volatile unsigned int tick_count;
 
 SdReader card;    // This object holds the information for the card
 FatVolume vol;    // This holds the information for the partition on the card
@@ -33,31 +48,30 @@ int freeRam(void)
 void sdErrorCheck(void)
 {
   if (!card.errorCode()) return;
-  putstring("\n\rSD I/O error: ");
+  Serial.print("\n\rSD I/O error: ");
   Serial.print(card.errorCode(), HEX);
-  putstring(", ");
+  Serial.print(", ");
   Serial.println(card.errorData(), HEX);
   while(1);
 }
 
 void setup() {
   
-  // set up serial port @ 9600 baud - this can be any speed really
+  // set up serial port
   Serial.begin(9600);
   
   // This can help with debugging, running out of RAM is bad
   // if this is under 150 bytes it may spell trouble!
-  putstring("Free RAM: ");
-  Serial.println(freeRam());
+  Serial.print("Free RAM: "); Serial.println(freeRam());
   
   // Setup hall sensor
   // enable pull-up resistors on switch pins (analog inputs)
-  putstring("Hall sensor listening on pin ");
-  Serial.println(HALL_PIN, DEC);
-  digitalWrite(HALL_PIN, HIGH);
+  Serial.print("Hall sensor listening on pin "); Serial.println(HALL_PIN, DEC);
+  digitalWrite(HALL_PIN, HIGH); // enable pull up resistor
  
-  putstring_nl("Setting up wave shield...");
-  // This sets up the wave shield
+  // Set up wave shield
+  Serial.println("Setting up wave shield...");
+
   // Set the output pins for the DAC control. This pins are defined in the library
   pinMode(2, OUTPUT);
   pinMode(3, OUTPUT);
@@ -66,7 +80,7 @@ void setup() {
  
   //  if (!card.init(true)) { //play with 4 MHz spi if 8MHz isn't working for you
   if (!card.init()) {         //play with 8 MHz spi (default faster!)  
-    putstring_nl("Card init. failed!");  // Something went wrong, lets print out why
+    Serial.println("Card init. failed!");  // Something went wrong, lets print out why
     sdErrorCheck();
     while(1);                            // then 'halt' - do nothing!
   }
@@ -81,64 +95,100 @@ void setup() {
       break;                             // we found one, lets bail
   }
   if (part == 5) {                       // if we ended up not finding one  :(
-    putstring_nl("No valid FAT partition!");
+    Serial.println("No valid FAT partition!");
     sdErrorCheck();      // Something went wrong, lets print out why
     while(1);                            // then 'halt' - do nothing!
   }
   
   // Lets tell the user about what we found
-  putstring("Using partition ");
+  Serial.print("Using partition ");
   Serial.print(part, DEC);
-  putstring(", type is FAT");
+  Serial.print(", type is FAT");
   Serial.println(vol.fatType(),DEC);     // FAT16 or FAT32?
   
   // Try to open the root directory
   if (!root.openRoot(vol)) {
-    putstring_nl("Can't open root dir!"); // Something went wrong,
+    Serial.println("Can't open root dir!"); // Something went wrong,
     while(1);                             // then 'halt' - do nothing!
   }
   
+  // setup initial wheel state
+  wheel_stop();
+  
   // This can help with debugging, running out of RAM is bad
   // if this is under 150 bytes it may spell trouble!
-  putstring("Free RAM: ");
+  Serial.print("Free RAM: ");
   Serial.println(freeRam());
   
   // Whew! We got past the tough parts.
-  putstring_nl("I'm ready for you to spin the wheel!");
+  Serial.println("I'm ready for you to spin the wheel!");
 }
 
 void loop() {
-  switch (check_hall_switch()) {
-    case 1:
-      playfile(TICK_FILE_NAME);
-      break;
+  current_tick = millis();
+  byte reading = digitalRead(HALL_PIN);
+
+  switch (wheel_state) {
+    case WHEEL_STOPPED:
+      if (reading == LOW && previous_sensor_state == HIGH && current_tick - last_tick > DEBOUNCE)
+      {
+        // magnet detected
+        Serial.println("Tick..."); 
+        
+        // check the tick count
+        if (tick_count > WHEEL_TICKS_BEFORE_SPIN) {
+          wheel_state = WHEEL_MOVING;
+          Serial.println("The wheel is spinning.");
+        }
+        
+        last_tick = current_tick;
+        tick_count++;  
+        
+        playfile(TICK_FILE_NAME);
+    
+      } else {
+        // no magnet detected - figure out if the wheel is stopped
+        if (current_tick - last_tick > WHEEL_STOP_THRESHOLD_MS) {
+          // wheel is stopped
+          playfile(STOP_FILE_NAME);
+          wheel_stop();
+        } 
+      }
+    break;
+    case WHEEL_MOVING: 
+      if (reading == LOW && previous_sensor_state == HIGH && current_tick - last_tick > DEBOUNCE)
+      {
+        // magnet detected
+        Serial.println("Tick..."); 
+    
+        wheel_state = WHEEL_MOVING;
+        last_tick = current_tick;
+        tick_count++;
+        
+        playfile(TICK_FILE_NAME);
+    
+      } else {
+        // no magnet detected - figure out if the wheel is stopped
+        if (current_tick - last_tick > WHEEL_STOP_THRESHOLD_MS) {
+          // wheel is stopped
+          playfile(STOP_FILE_NAME);
+          wheel_stop();
+        } 
+      }
+    break;
   }
+
+  previous_sensor_state = reading;
 }
 
-boolean check_hall_switch()
-{
-  static byte previous;
-  static long time;
-  byte reading;
-  byte pressed = false;
-  pressed = 0;
-
-  reading = digitalRead(HALL_PIN);
-  if (reading == LOW && previous == HIGH && millis() - time > DEBOUNCE)
-  {
-      // switch pressed
-      time = millis();
-      pressed = true;
-  }
-  previous = reading;
-  
-  if (pressed) {
-    Serial.print("Tick goes the wheel..."); 
-    Serial.print("\n");
-  }
-  return (pressed);
+// Sets the initial state of the wheel and clears the speed buffer
+void wheel_stop() {
+  wheel_state = WHEEL_STOPPED;
+  current_tick = 0;
+  last_tick = 0;
+  tick_count = 0;
+  Serial.println("The wheel has stopped.");
 }
-
 
 void playfile(char *name) {
   // see if the wave object is currently doing something
@@ -148,12 +198,12 @@ void playfile(char *name) {
 
   // look in the root directory and open the file
   if (!f.open(root, name)) {
-    putstring("Couldn't open file "); Serial.print(name); return;
+    Serial.print("Couldn't open file "); Serial.print(name); return;
   }
 
   // OK read the file and turn it into a wave object
   if (!wave.create(f)) {
-    putstring_nl("Not a valid WAV"); return;
+    Serial.println("Not a valid WAV"); return;
   }
   
   // ok time to play! start playback
